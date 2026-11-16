@@ -234,7 +234,7 @@
                         <button onclick="toggleDiffView()" id="diff-toggle-btn" class="bg-indigo-600/20 hover:bg-indigo-600/40 border border-indigo-500/40 text-indigo-300 text-[11px] font-semibold py-1 px-2 rounded-lg transition" title="Compare Old vs New">
                             🔀 Diff View
                         </button>
-                        <button onclick="applyFixToEditor()" class="bg-blue-600/20 hover:bg-blue-600/40 border border-blue-500/40 text-blue-300 text-[11px] font-semibold py-1 px-2 rounded-lg transition" title="Replace editor code">
+                        <button onclick="applyFixToEditor()" id="apply-btn" class="bg-blue-600/20 hover:bg-blue-600/40 border border-blue-500/40 text-blue-300 text-[11px] font-semibold py-1 px-2 rounded-lg transition" title="Replace editor code">
                             ✨ Apply
                         </button>
                         <button onclick="downloadFixedCode()" class="bg-slate-800 hover:bg-slate-700 border border-slate-600/50 text-slate-200 text-[11px] font-semibold py-1 px-2 rounded-lg transition" title="Download File">
@@ -265,7 +265,6 @@
         let currentAudio = null;
         let reviewHistory = JSON.parse(localStorage.getItem('diyar_code_history')) || [];
 
-        // Exact 4 sound files in 'sounds/' folder
         const successSounds = [
             'sounds/cena.mp3',
             'sounds/gta-san-andreas-abertura-oficial.mp3'
@@ -368,11 +367,11 @@
             const input = document.getElementById('code-input');
             
             if (lang === 'python') {
-                input.value = `def process_data(a, b, c, d, e, f):\n    prni(hello)\n    result = eval("2 + 2")\n    if result == None:\n        pass`;
+                input.value = `def process_data(a, b, c, d, e, f):\n    prni(hello\n    result = eval("2 + 2")\n    if result == None:\n        pass`;
             } else if (lang === 'cpp') {
                 input.value = `#include <iostream>\nusing namespace std;\n\nint main() {\n    int 3.4 = x\n    cot << hello\n    return 0;\n}`;
             } else if (lang === 'javascript') {
-                input.value = `function calculateTotal(price, tax) {\n    conosle.log(hello)\n    var total = price + tax\n    if (total == 0) return false\n    return total;\n}`;
+                input.value = `function calculateTotal(price, tax) {\n    conosle.log(hello\n    var total = price + tax\n    if (total == 0) return false\n    return total;\n}`;
             }
             handleEditorInput();
             showToast(`Loaded ${lang.toUpperCase()} sample code!`);
@@ -465,7 +464,7 @@
             resultsBox.innerHTML = `
                 <div class="h-full flex flex-col items-center justify-center text-blue-400 space-y-2 animate-pulse">
                     <div class="w-6 h-6 border-2 border-blue-400 border-t-transparent rounded-full animate-spin"></div>
-                    <span>Parsing AST & building symbol table...</span>
+                    <span>Parsing AST & checking syntax balance...</span>
                 </div>`;
 
             setTimeout(() => {
@@ -527,6 +526,59 @@
             return symbols;
         }
 
+        // Helper: Check & balance unclosed parentheses/brackets/quotes on a line
+        function balanceLineDelimiters(line, lineNum, issues) {
+            let fixed = line;
+            let scorePenalty = 0;
+
+            // Check unclosed double quotes
+            const doubleQuotes = (fixed.match(/"/g) || []).length;
+            if (doubleQuotes % 2 !== 0) {
+                issues.push({ line: lineNum, severity: "Critical", type: "Syntax Error", message: "Unclosed string literal: missing '\"' at end of line." });
+                fixed += '"';
+                scorePenalty += 20;
+            }
+
+            // Check unclosed single quotes
+            const singleQuotes = (fixed.match(/'/g) || []).length;
+            if (singleQuotes % 2 !== 0) {
+                issues.push({ line: lineNum, severity: "Critical", type: "Syntax Error", message: "Unclosed string literal: missing \"'\" at end of line." });
+                fixed += "'";
+                scorePenalty += 20;
+            }
+
+            // Check unclosed parentheses '(' vs ')'
+            const openParens = (fixed.match(/\(/g) || []).length;
+            const closeParens = (fixed.match(/\)/g) || []).length;
+            if (openParens > closeParens) {
+                const diff = openParens - closeParens;
+                issues.push({ line: lineNum, severity: "Critical", type: "Unclosed Parenthesis", message: `Missing ${diff} closing parenthesis ')' at end of statement.` });
+                if (fixed.trim().endsWith(';')) {
+                    fixed = fixed.replace(/;\s*$/, ')'.repeat(diff) + ';');
+                } else if (fixed.trim().endsWith(':')) {
+                    fixed = fixed.replace(/:\s*$/, ')'.repeat(diff) + ':');
+                } else {
+                    fixed += ')'.repeat(diff);
+                }
+                scorePenalty += 20;
+            } else if (closeParens > openParens) {
+                issues.push({ line: lineNum, severity: "Critical", type: "Syntax Error", message: "Extra unmatched closing parenthesis ')' detected." });
+                scorePenalty += 20;
+            }
+
+            // Check unclosed square brackets '[' vs ']'
+            const openBrackets = (fixed.match(/\[/g) || []).length;
+            const closeBrackets = (fixed.match(/\]/g) || []).length;
+            if (openBrackets > closeBrackets) {
+                const diff = openBrackets - closeBrackets;
+                issues.push({ line: lineNum, severity: "High", type: "Unclosed Bracket", message: `Missing ${diff} closing bracket ']' at end of expression.` });
+                fixed += ']'.repeat(diff);
+                scorePenalty += 15;
+            }
+
+            return { fixed, scorePenalty };
+        }
+
         function executeReviewLogic(isAppliedFix = false) {
             const code = document.getElementById('code-input').value;
             const lang = document.getElementById('lang-select').value;
@@ -534,6 +586,7 @@
             const fixedOutput = document.getElementById('fixed-code-output');
             const outputActions = document.getElementById('output-actions');
             const readyBadge = document.getElementById('ready-badge');
+            const applyBtn = document.getElementById('apply-btn');
 
             latestOriginalCode = code;
             const definedSymbols = extractDefinedSymbols(code, lang);
@@ -552,6 +605,12 @@
                     correctedLines.push(line);
                     return;
                 }
+
+                // 0. Universal Parentheses / Brackets / Quotes Balance Check FIRST
+                const balanceResult = balanceLineDelimiters(currentFixedLine, lineNum, issues);
+                currentFixedLine = balanceResult.fixed;
+                totalScore -= balanceResult.scorePenalty;
+                trimmed = currentFixedLine.trim();
 
                 // ================= PYTHON PRECISION RULES =================
                 if (lang === 'python') {
@@ -600,7 +659,7 @@
                         currentFixedLine = indent + '# TODO: Implement logic';
                         totalScore -= 10;
                     }
-                    // 7. Excessive function parameters (> 4) -> Auto-refactor to *args!
+                    // 7. Excessive function parameters (> 4) -> Auto-refactor to *args
                     if (trimmed.startsWith('def ')) {
                         const match = trimmed.match(/def\s+([a-zA-Z_]\w*)\s*\((.*?)\):/);
                         if (match) {
@@ -697,6 +756,18 @@
                 correctedLines.push(currentFixedLine);
             });
 
+            // Check global curly braces '{' vs '}' across multi-line blocks (C++ / JS)
+            if (lang === 'cpp' || lang === 'javascript') {
+                const openBraces = (code.match(/\{/g) || []).length;
+                const closeBraces = (code.match(/\}/g) || []).length;
+                if (openBraces > closeBraces) {
+                    const diff = openBraces - closeBraces;
+                    issues.push({ line: lines.length, severity: "Critical", type: "Unclosed Block", message: `Missing ${diff} closing curly brace '}' at end of file.` });
+                    correctedLines.push('}'.repeat(diff));
+                    totalScore -= 25;
+                }
+            }
+
             if (totalScore < 0) totalScore = 0;
             animateScoreRing(totalScore);
 
@@ -719,6 +790,8 @@
             }
 
             if (issues.length === 0) {
+                readyBadge.innerText = "Already Clean";
+                applyBtn.classList.add('hidden');
                 playRandomMemeSound(true);
                 resultsBox.innerHTML = `
                     <div class="h-full flex flex-col items-center justify-center text-emerald-400 text-center p-4 animate-slide-up">
@@ -727,7 +800,8 @@
                         <span class="text-[11px] text-slate-400 mt-1">Zero syntax errors or code smells found.</span>
                     </div>`;
             } else {
-                // Only play error sound if this was NOT triggered by clicking Apply Fix
+                readyBadge.innerText = "100% Fixed";
+                applyBtn.classList.remove('hidden');
                 playRandomMemeSound(isAppliedFix ? true : false);
                 let html = '';
                 issues.forEach((issue, idx) => {
